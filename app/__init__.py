@@ -7,7 +7,7 @@ is checked file by file before it is installed, then shows up in their menu.
 
 Controls:
 * Up / Down = Pick an app
-* Enter = Send / Accept
+* Enter = Send / Accept; in the lobby, a QR code to get Air Merge
 * Back = Cancel, decline, leave the pairing, exit
 """
 
@@ -384,8 +384,13 @@ class App:
                     self.proximity.update(now)
                 except Exception:
                     pass
-            if badge.pressed(BUTTON_BACK):
+            if badge.pressed(BUTTON_SELECT):
+                self.state = ui.SHARE
+            elif badge.pressed(BUTTON_BACK):
                 self.exit()
+        elif s == ui.SHARE:
+            if badge.pressed(BUTTON_BACK) or badge.pressed(BUTTON_SELECT):
+                self.state = ui.LOBBY
         elif s == ui.PAIRED:
             n = len(self.apps)
             step = 0

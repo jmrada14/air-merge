@@ -23,6 +23,10 @@ Merge's own code to pair, ask for consent, verify and install. The first
 install on each badge therefore goes through a computer (see Install below).
 After that, sending Air Merge itself is how you pass a newer version along.
 
+To get someone started, press **Enter** in the lobby: Air Merge shows a QR
+code for this repo that they can scan with their phone to find the installer.
+**Back** returns to the lobby.
+
 ## Safety
 
 - Only the files inside the chosen app's folder are sent — never
@@ -76,6 +80,7 @@ leave the disk mounted.
 | `fixtures/` | Sample apps used by the simulator |
 | `install.sh` | Installs Air Merge onto a badge in USB disk mode |
 | `tools/menu_icon.py` | Builds the menu icon and its animation (`--preview` draws a PNG of the frames) |
+| `tools/qr_code.py` | Writes the repo's QR code into `app/am_ui.py` (needs `pip install segno`) |
 | `DESIGN.md` | Measured badge facts, module contract and protocol |
 
 ## Simulator

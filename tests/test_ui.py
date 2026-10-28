@@ -80,7 +80,7 @@ class TestScreens(unittest.TestCase):
             (ui.CONFIRM_SEND, P.IDLE), (ui.OFFERED, P.PREP), (ui.OFFERED, P.OFFER),
             (ui.SENDING, P.SEND), (ui.SENDING, P.AWAIT), (ui.OFFER_IN, P.ASK),
             (ui.OFFER_BAD, P.IDLE), (ui.RECEIVING, P.RECV), (ui.VERIFYING, P.VERIFY),
-            (ui.INSTALLING, P.INSTALL),
+            (ui.INSTALLING, P.INSTALL), (ui.SHARE, P.IDLE),
         ]
         drawn = 0
         for state, est in cases:
