@@ -18,7 +18,10 @@ and nothing moves without both people saying yes.
    with SHA-256, and only then is it installed. Exit Air Merge and it's in the
    menu.
 
-Air Merge can send itself, so a friend without it can get it from you.
+Both badges need Air Merge installed and open: the receiving badge runs Air
+Merge's own code to pair, ask for consent, verify and install. The first
+install on each badge therefore goes through a computer (see Install below).
+After that, sending Air Merge itself is how you pass a newer version along.
 
 ## Safety
 
@@ -35,9 +38,21 @@ Air Merge can send itself, so a friend without it can get it from you.
 
 ## Install
 
-1. Open **Mass Storage** on the badge so it mounts as `BADGER`.
-2. Run `./deploy.sh` (or `./deploy.sh /Volumes/OTHER`).
-3. Eject the disk and reboot the badge. Air Merge appears at the end of the menu.
+Every badge that wants to send or receive needs Air Merge once.
+
+1. Plug the badge into a computer and open **Mass Storage** on it so it mounts
+   as `BADGER`.
+2. Run the installer, no clone needed:
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/jmrada14/air-merge/main/install.sh | sh
+   ```
+   or, from a clone of this repo, `./install.sh`.
+3. Reboot the badge. Air Merge appears at the end of the menu.
+
+The installer finds the badge on macOS and Linux, copies the app into
+`apps/air_merge/`, checks the copy and ejects the disk. Options:
+`--volume PATH` if the badge mounts somewhere else, `--ref NAME` to install a
+branch or tag, `--no-eject` to leave it mounted.
 
 ## Layout
 
@@ -50,6 +65,7 @@ Air Merge can send itself, so a friend without it can get it from you.
 | `tests/` | Unit tests (`python3 -I -m unittest discover -s tests`) |
 | `sim/` | Two-badge desktop simulator, see `sim/README.md` |
 | `fixtures/` | Sample apps used by the simulator |
+| `install.sh` | Installs Air Merge onto a badge in USB disk mode |
 | `DESIGN.md` | Measured badge facts, module contract and protocol |
 
 ## Simulator
