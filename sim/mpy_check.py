@@ -17,7 +17,7 @@ BANNED_MODULES = {
 }
 ALLOWED_MODULES = {"math", "random", "array", "struct", "os", "sys", "gc", "micropython",
                    "badgeware", "pairing", "json", "hashlib", "binascii", "vfs", "rp2",
-                   "builtins"}
+                   "builtins", "time"}
 LOCAL_PREFIX = "am_"
 # CPython os functions MicroPython's os module doesn't have
 OS_MISSING = {"path", "walk", "makedirs", "removedirs", "scandir", "replace", "getenv",

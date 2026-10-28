@@ -1,0 +1,745 @@
+# Air Merge screens. Everything here only draws; the state lives in __init__.App (`a`)
+# and am_proto.Engine (`a.engine`).
+
+import math
+
+import am_proto
+
+WIDTH = 320
+HEIGHT = 240
+
+FONT_TITLE = "ignore"
+FONT_BIG = "more"
+FONT_BODY = "bacteria"
+FONT_SMALL = "smart"
+
+# app states (DESIGN.md names; NOLINK and OFFER_BAD are extra)
+NOLINK = 0
+LOBBY = 1
+PAIRED = 2          # app list: pick one to send, or wait to receive
+CONFIRM_SEND = 3    # "Send Snake to Bo?"
+OFFERED = 4         # sender: preparing / waiting for the answer
+SENDING = 5         # sender: streaming, then waiting for the receiver's result
+OFFER_IN = 6        # receiver: accept or decline
+OFFER_BAD = 7       # receiver: offer refused automatically (invalid / too big)
+RECEIVING = 8
+VERIFYING = 9
+INSTALLING = 10
+DONE = 11
+
+SENDER = (OFFERED, SENDING)
+RECEIVER = (RECEIVING, VERIFYING, INSTALLING)
+
+ROWS = 6
+ROW_H = 26
+LIST_Y = 50
+
+_K = None
+_mw = {}
+
+
+def _c(r, g, b, a=255):
+    return color.rgb(r, g, b, a)
+
+
+def K():
+    global _K
+    if _K is None:
+        _K = {
+            "bg": _c(13, 17, 23),
+            "bg_hi": _c(18, 22, 34),
+            "panel": _c(22, 27, 34),
+            "panel_hi": _c(33, 38, 52),
+            "line": _c(48, 54, 61),
+            "text": _c(230, 237, 243),
+            "muted": _c(139, 148, 158),
+            "dim": _c(72, 79, 88),
+            "black": _c(8, 10, 14),
+            "chip": _c(230, 233, 240),
+            "purple": _c(88, 58, 247),
+            "purple_d": _c(44, 30, 120),
+            "purple_l": _c(160, 140, 255),
+            "blue": _c(22, 143, 251),
+            "blue_d": _c(12, 60, 110),
+            "green": _c(15, 191, 62),
+            "green_d": _c(8, 70, 30),
+            "pink": _c(247, 54, 120),
+            "pink_d": _c(70, 16, 38),
+            "gold": _c(255, 204, 51),
+            "badge": _c(226, 228, 238),
+            "badge_d": _c(150, 154, 170),
+            "glow": _c(88, 58, 247, 70),
+        }
+    return _K
+
+
+# --- text helpers -------------------------------------------------------------------------
+
+def use(fname):
+    screen.font = getattr(font, fname)
+
+
+def measure(s, fname):
+    key = fname + s
+    wh = _mw.get(key)
+    if wh is None:
+        if len(_mw) > 160:
+            _mw.clear()
+        use(fname)
+        wh = screen.measure_text(s)
+        _mw[key] = wh
+    return wh
+
+
+def text(s, x, y, fname, pen):
+    use(fname)
+    screen.pen = pen
+    screen.text(s, x, y)
+
+
+def ctext(s, cx, y, fname, pen):
+    w, h = measure(s, fname)
+    text(s, cx - w / 2, y, fname, pen)
+    return w, h
+
+
+def rtext(s, rx, y, fname, pen):
+    w, h = measure(s, fname)
+    text(s, rx - w, y, fname, pen)
+    return w, h
+
+
+def fit(s, fname, maxw):
+    s = str(s)
+    if measure(s, fname)[0] <= maxw:
+        return s
+    while len(s) > 1 and measure(s + "...", fname)[0] > maxw:
+        s = s[:-1]
+    return s.rstrip() + "..."
+
+
+def wrap(s, fname, maxw, lines=2):
+    """Word wrap into at most `lines` lines, balanced so no word is left alone."""
+    out = _wrap(s, fname, maxw, lines)
+    if 1 < len(out) <= lines:
+        w = maxw
+        while w > 60:
+            t = _wrap(s, fname, w - 12, lines + 1)
+            if len(t) > len(out):
+                break
+            w -= 12
+            out = t
+    return out
+
+
+def _wrap(s, fname, maxw, lines):
+    out = []
+    cur = ""
+    for word in str(s).split(" "):
+        t = cur + " " + word if cur else word
+        if measure(t, fname)[0] <= maxw or not cur:
+            cur = t
+        else:
+            out.append(cur)
+            cur = word
+    if cur:
+        out.append(cur)
+    if len(out) > lines:
+        out = out[:lines]
+        out[-1] = fit(out[-1] + " ...", fname, maxw)
+    return [fit(x, fname, maxw) for x in out]
+
+
+def fmt_size(n):
+    if n < 1024:
+        return "%d B" % n
+    if n < 10 * 1024:
+        return "%.1f KB" % (n / 1024)
+    if n < 1024 * 1024:
+        return "%d KB" % ((n + 512) // 1024)
+    return "%.1f MB" % (n / 1048576)
+
+
+def fmt_files(n):
+    return "1 file" if n == 1 else "%d files" % n
+
+
+def fmt_app(size, files):
+    return "%s, %s" % (fmt_size(size), fmt_files(files))
+
+
+# --- shapes -------------------------------------------------------------------------------
+
+def panel(x, y, w, h, pen):
+    # rounded-ish rectangle without overlapping (alpha-safe)
+    screen.pen = pen
+    screen.rectangle(x + 2, y, w - 4, 1)
+    screen.rectangle(x + 1, y + 1, w - 2, 1)
+    screen.rectangle(x, y + 2, w, h - 4)
+    screen.rectangle(x + 1, y + h - 2, w - 2, 1)
+    screen.rectangle(x + 2, y + h - 1, w - 4, 1)
+
+
+def box(x, y, w, h, fill, border):
+    panel(x, y, w, h, border)
+    panel(x + 1, y + 1, w - 2, h - 2, fill)
+
+
+def bar(x, y, w, h, frac, fg, bg):
+    if frac < 0:
+        frac = 0.0
+    elif frac > 1:
+        frac = 1.0
+    screen.pen = bg
+    screen.rectangle(x, y, w, h)
+    if frac > 0:
+        screen.pen = fg
+        screen.rectangle(x, y, max(1, int(w * frac)), h)
+
+
+def thick_line(x0, y0, x1, y1, pen, t=1):
+    screen.pen = pen
+    for dx in range(-t, t + 1):
+        for dy in range(-t, t + 1):
+            if dx * dx + dy * dy <= t * t + 1:
+                screen.line(vec2(x0 + dx, y0 + dy), vec2(x1 + dx, y1 + dy))
+
+
+def status_icon(cx, cy, r, ok):
+    """ok True: green check, False: pink cross, None: blue question mark."""
+    k = K()
+    screen.pen = k["green_d"] if ok else (k["blue_d"] if ok is None else k["pink_d"])
+    screen.circle(vec2(cx, cy), r + 5)
+    screen.pen = k["green"] if ok else (k["blue"] if ok is None else k["pink"])
+    screen.circle(vec2(cx, cy), r)
+    ink = k["bg"]
+    s = r * 0.45
+    if ok is None:
+        w, h = measure("?", FONT_TITLE)
+        text("?", cx - w / 2, cy - h / 2, FONT_TITLE, ink)
+    elif ok:
+        thick_line(cx - s, cy, cx - s * 0.25, cy + s * 0.8, ink)
+        thick_line(cx - s * 0.25, cy + s * 0.8, cx + s * 1.05, cy - s * 0.75, ink)
+    else:
+        thick_line(cx - s, cy - s, cx + s, cy + s, ink)
+        thick_line(cx - s, cy + s, cx + s, cy - s, ink)
+
+
+def merge_glyph(x, y, pen, s=1.0):
+    """GitHub's merge icon: two stacked dots joined, a third merging in."""
+    screen.pen = pen
+    r = 2.2 * s
+    a = vec2(x + 3 * s, y + 2.5 * s)
+    b = vec2(x + 3 * s, y + 13.5 * s)
+    c = vec2(x + 11 * s, y + 8 * s)
+    screen.line(a, b)
+    screen.line(vec2(x + 3 * s + 1, y + 2.5 * s), vec2(x + 3 * s + 1, y + 13.5 * s))
+    screen.line(vec2(x + 3 * s, y + 3 * s), c)
+    screen.line(vec2(x + 3 * s, y + 4 * s), vec2(c.x, c.y + 1))
+    screen.circle(a, r)
+    screen.circle(b, r)
+    screen.circle(c, r)
+
+
+def warn_triangle(x, y, s, pen, ink):
+    screen.pen = pen
+    screen.triangle(vec2(x + s / 2, y), vec2(x + s, y + s * 0.9), vec2(x, y + s * 0.9))
+    screen.pen = ink
+    screen.rectangle(x + s / 2 - 1, y + s * 0.3, 2, s * 0.32)
+    screen.rectangle(x + s / 2 - 1, y + s * 0.7, 2, 2)
+
+
+def identicon(a, id_, x, y, size):
+    if id_ is None or a.badgelink is None:
+        k = K()
+        screen.pen = k["dim"]
+        screen.rectangle(x, y, size, size)
+        return
+    try:
+        a.badgelink.draw_identicon(screen, id_, x, y, size)
+    except Exception:
+        pass
+
+
+def badge_icon(a, cx, y, id_, accent, now, active):
+    """A little badge (lanyard slot, screen with the owner's identicon, buttons)."""
+    k = K()
+    w = 40
+    h = 50
+    x = cx - w / 2
+    if active:
+        glow = 3 + 2 * math.sin(now / 160)
+        panel(x - glow, y - glow, w + 2 * glow, h + 2 * glow, k["glow"])
+    panel(x, y, w, h, k["badge"])
+    screen.pen = k["badge_d"]
+    screen.rectangle(cx - 6, y + 3, 12, 2)
+    screen.pen = k["black"]
+    screen.rectangle(x + 4, y + 8, w - 8, 28)
+    identicon(a, id_, cx - 12, y + 10, 24)
+    screen.pen = accent
+    for i in range(3):
+        screen.rectangle(x + 9 + i * 9, y + h - 9, 5, 4)
+
+
+def beam(x0, x1, y, now, moving, reverse=False):
+    """Packets flying from x0 to x1 (or a calm dashed line when not moving)."""
+    k = K()
+    screen.pen = k["line"]
+    x = x0
+    while x < x1:
+        screen.rectangle(x, y, 4, 1)
+        x += 8
+    if not moving:
+        t = (now % 1600) / 1600.0
+        screen.pen = k["dim"]
+        screen.circle(vec2(x0 + (x1 - x0) * t, y), 2)
+        return
+    cols = (k["purple"], k["blue"], k["green"], k["pink"])
+    n = 5
+    for i in range(n):
+        t = ((now / 900.0) + i / n) % 1.0
+        if reverse:
+            t = 1.0 - t
+        px = x0 + (x1 - x0) * t
+        fade = math.sin(t * math.pi)
+        r = 1.5 + 2.5 * fade
+        screen.pen = cols[i % 4]
+        screen.rectangle(px - r * 1.8, y - r / 2, r * 3.6, r)
+        screen.circle(vec2(px + r * 1.8, y), r * 0.8)
+
+
+def spinner(cx, cy, now, pen):
+    for i in range(8):
+        ang = i * math.pi / 4
+        on = (now // 110) % 8
+        d = (on - i) % 8
+        r = 2.4 - d * 0.25
+        if r > 0.5:
+            screen.pen = pen if d < 3 else K()["dim"]
+            screen.circle(vec2(cx + 9 * math.cos(ang), cy + 9 * math.sin(ang)), r)
+
+
+def hints(pairs):
+    k = K()
+    total = 0
+    bh = 0
+    for label, btn in pairs:
+        bw, h = measure(btn, FONT_SMALL)
+        lw, lh = measure(label, FONT_SMALL)
+        total += bw + 8 + 4 + lw + 12
+        bh = max(bh, h, lh)
+    total -= 12
+    ch = bh + 4
+    cy = 229
+    x = (WIDTH - total) / 2
+    panel(x - 6, cy - ch / 2 - 3, total + 12, ch + 6, k["panel"])
+    for label, btn in pairs:
+        bw, h = measure(btn, FONT_SMALL)
+        lw, lh = measure(label, FONT_SMALL)
+        panel(x, cy - ch / 2, bw + 8, ch, k["chip"])
+        text(btn, x + 4, cy - h / 2, FONT_SMALL, k["black"])
+        x += bw + 8 + 4
+        text(label, x, cy - lh / 2, FONT_SMALL, k["text"])
+        x += lw + 12
+
+
+def background():
+    k = K()
+    screen.pen = k["bg"]
+    screen.clear()
+
+
+def header(a):
+    k = K()
+    screen.pen = k["panel"]
+    screen.rectangle(0, 0, WIDTH, 26)
+    screen.pen = k["purple"]
+    screen.rectangle(0, 26, WIDTH, 1)
+    merge_glyph(8, 5, k["purple_l"])
+    w, h = measure("Air Merge", FONT_BODY)
+    text("Air Merge", 26, 13 - h / 2, FONT_BODY, k["text"])
+    if a.partner_id is not None or a.engine.orphan:
+        name = fit(a.partner_name, FONT_SMALL, 110)
+        nw, nh = measure(name, FONT_SMALL)
+        x = WIDTH - 10 - nw
+        text(name, x, 13 - nh / 2, FONT_SMALL, k["muted"] if a.engine.orphan else k["text"])
+        identicon(a, a.partner_id, x - 22, 5, 16)
+        lw, lh = measure("with", FONT_SMALL)
+        text("with", x - 28 - lw, 13 - lh / 2, FONT_SMALL, k["dim"])
+
+
+def toast(a, now, y):
+    if a.msg is None or now >= a.msg_until:
+        return False
+    k = K()
+    s = fit(a.msg, FONT_SMALL, WIDTH - 40)
+    w, h = measure(s, FONT_SMALL)
+    pen = k["pink"] if a.msg_bad else k["blue"]
+    box((WIDTH - w) / 2 - 10, y - 4, w + 20, h + 8, k["panel"], pen)
+    text(s, (WIDTH - w) / 2, y, FONT_SMALL, k["text"])
+    return True
+
+
+# --- screens -------------------------------------------------------------------------------
+
+def draw(a, now):
+    s = a.state
+    background()
+    if s == NOLINK:
+        _nolink(a)
+    elif s == LOBBY:
+        _lobby(a, now)
+    elif s == PAIRED:
+        _list(a, now)
+    elif s == CONFIRM_SEND:
+        _confirm(a, now)
+    elif s in SENDER:
+        _out(a, now)
+    elif s == OFFER_IN:
+        _ask(a, now)
+    elif s == OFFER_BAD:
+        _bad(a, now)
+    elif s in RECEIVER:
+        _in(a, now)
+    elif s == DONE:
+        _result(a, now)
+
+
+def _title(y):
+    k = K()
+    t = "Air Merge"
+    w, h = measure(t, FONT_TITLE)
+    x = (WIDTH - w) / 2 + 10
+    merge_glyph(x - 26, y + h / 2 - 9, k["purple_l"], 1.15)
+    text(t, x + 2, y + 2, FONT_TITLE, k["purple_d"])
+    text(t, x, y, FONT_TITLE, k["text"])
+    return h
+
+
+def _nolink(a):
+    k = K()
+    h = _title(60)
+    ctext("badge link not available", WIDTH / 2, 70 + h, FONT_BODY, k["text"])
+    ctext(fit(a.error or "", FONT_SMALL, 280), WIDTH / 2, 92 + h, FONT_SMALL, k["muted"])
+    hints((("exit", "BACK"),))
+
+
+def _lobby(a, now):
+    k = K()
+    h = _title(10)
+    ctext("Share apps badge to badge", WIDTH / 2, 16 + h, FONT_SMALL, k["muted"])
+
+    panel(16, 48, WIDTH - 32, 38, k["panel"])
+    identicon(a, a.my_id, 26, 55, 24)
+    name = fit(a.my_name, FONT_BODY, 200)
+    nw, nh = measure(name, FONT_BODY)
+    text(name, 60, 56, FONT_BODY, k["text"])
+    text("%d apps ready to share" % len(a.apps), 60, 58 + nh + 2, FONT_SMALL, k["muted"])
+
+    prox = a.proximity
+    status = "hold badges back to back"
+    pen = k["text"]
+    mode = 0
+    progress = 0.0
+    try:
+        if prox.cooling(now) is not None:
+            status = "pull apart"
+            pen = k["gold"]
+            mode = 1
+        else:
+            peer = prox.syncing()
+            if peer is not None:
+                progress = prox.progress(now)
+                mode = 2
+                if progress >= 1.0:
+                    status = "connecting..."
+                else:
+                    status = "syncing with %s" % (peer.name or "badge")
+                pen = k["green"]
+    except Exception:
+        pass
+    ctext(fit(status, FONT_BODY, 290), WIDTH / 2, 96, FONT_BODY, pen)
+    if mode == 2:
+        bar(40, 112, WIDTH - 80, 5, progress, k["green"], k["line"])
+    try:
+        if mode == 1:
+            a.pairing.draw_apart()
+        elif mode == 2:
+            a.pairing.draw_together(now)
+        else:
+            a.pairing.draw_loop(now)
+    except Exception:
+        pass
+    toast(a, now, 198)
+    hints((("exit", "BACK"),))
+
+
+def _list(a, now):
+    k = K()
+    header(a)
+    apps = a.apps
+    who = fit(a.partner_name, FONT_BODY, 150)
+    text("Send an app to " + who, 12, 33, FONT_BODY, k["text"])
+    rtext("%d apps" % len(apps), WIDTH - 12, 34, FONT_SMALL, k["dim"])
+    if not apps:
+        ctext("No apps to share yet", WIDTH / 2, 110, FONT_BODY, k["muted"])
+    top = a.top
+    for row in range(ROWS):
+        i = top + row
+        if i >= len(apps):
+            break
+        app = apps[i]
+        y = LIST_Y + row * ROW_H
+        sel = i == a.sel
+        if sel:
+            panel(8, y, WIDTH - 22, ROW_H - 3, k["purple"])
+        else:
+            panel(8, y, WIDTH - 22, ROW_H - 3, k["panel"])
+        info = fmt_app(app["size"], app["files"])
+        iw, ih = measure(info, FONT_SMALL)
+        name = app["name"]
+        if app["slug"] == "air_merge":
+            name += " (this app)"
+        name = fit(name, FONT_BODY, WIDTH - 60 - iw)
+        nw, nh = measure(name, FONT_BODY)
+        cy = y + (ROW_H - 3) / 2
+        text(name, 18, cy - nh / 2, FONT_BODY, k["text"])
+        text(info, WIDTH - 22 - iw, cy - ih / 2, FONT_SMALL, k["text"] if sel else k["muted"])
+    # scrollbar
+    n = len(apps)
+    if n > ROWS:
+        track = ROWS * ROW_H - 3
+        screen.pen = k["panel"]
+        screen.rectangle(WIDTH - 9, LIST_Y, 3, track)
+        th = max(10, track * ROWS / n)
+        ty = LIST_Y + (track - th) * top / (n - ROWS)
+        screen.pen = k["purple_l"]
+        screen.rectangle(WIDTH - 9, ty, 3, th)
+    if not toast(a, now, 208):
+        ctext(fit("%s can send you one too" % a.partner_name, FONT_SMALL, 280), WIDTH / 2, 208,
+              FONT_SMALL, k["dim"])
+    if apps:
+        hints((("send", "ENTER"), ("leave", "BACK")))
+    else:
+        hints((("leave", "BACK"),))
+
+
+def _confirm(a, now):
+    k = K()
+    header(a)
+    app = a.pick
+    box(16, 34, WIDTH - 32, 170, k["panel"], k["line"])
+    ctext("Send", WIDTH / 2, 44, FONT_SMALL, k["muted"])
+    name = fit(app["name"], FONT_TITLE, WIDTH - 60)
+    w, h = ctext(name, WIDTH / 2, 58, FONT_TITLE, k["text"])
+    ctext(fmt_app(app["size"], app["files"]), WIDTH / 2, 64 + h, FONT_BODY, k["muted"])
+    ctext("to", WIDTH / 2, 98, FONT_SMALL, k["muted"])
+    who = fit(a.partner_name, FONT_TITLE, 200)
+    ww, wh = measure(who, FONT_TITLE)
+    x = (WIDTH - ww - 30) / 2
+    identicon(a, a.partner_id, x, 114 + wh / 2 - 11, 22)
+    text(who, x + 30, 114, FONT_TITLE, k["text"])
+    screen.pen = k["line"]
+    screen.rectangle(32, 156, WIDTH - 64, 1)
+    ctext("Send %s to %s?" % (fit(app["name"], FONT_SMALL, 110), fit(a.partner_name, FONT_SMALL, 80)),
+          WIDTH / 2, 164, FONT_SMALL, k["text"])
+    ctext("They will be asked to accept.", WIDTH / 2, 180, FONT_SMALL, k["muted"])
+    hints((("send", "ENTER"), ("cancel", "BACK")))
+
+
+def _pair_art(a, now, sender_is_me, moving, y=58):
+    """Two badges with the beam between them; names underneath."""
+    k = K()
+    left_id = a.my_id if sender_is_me else a.partner_id
+    right_id = a.partner_id if sender_is_me else a.my_id
+    left_name = "you" if sender_is_me else a.partner_name
+    right_name = a.partner_name if sender_is_me else "you"
+    badge_icon(a, 64, y, left_id, k["purple"], now, moving and sender_is_me)
+    badge_icon(a, WIDTH - 64, y, right_id, k["blue"], now, moving and not sender_is_me)
+    beam(92, WIDTH - 94, y + 22, now, moving)
+    ctext(fit(left_name, FONT_SMALL, 110), 64, y + 56, FONT_SMALL, k["muted"])
+    ctext(fit(right_name, FONT_SMALL, 110), WIDTH - 64, y + 56, FONT_SMALL, k["muted"])
+
+
+def _progress(a, now, done, total, y):
+    k = K()
+    frac = done / total if total else 1.0
+    bar(20, y, WIDTH - 40, 8, frac, k["green"], k["line"])
+    pct = "%d%%" % int(frac * 100)
+    left = "%s / %s" % (fmt_size(done), fmt_size(total))
+    text(left, 20, y + 14, FONT_BODY, k["text"])
+    rtext(pct, WIDTH - 20, y + 14, FONT_BODY, k["text"])
+
+
+def _out(a, now):
+    k = K()
+    header(a)
+    eng = a.engine
+    st = eng.state
+    app = a.pick
+    name = app["name"] if app else (eng.m["name"] if eng.m else "app")
+    who = a.partner_name
+    moving = st == am_proto.SEND
+    if st in (am_proto.PREP, am_proto.OFFER):
+        title = "Offering " + name
+    elif st == am_proto.AWAIT:
+        title = "Sent " + name
+    else:
+        title = "Sending " + name
+    ctext(fit(title, FONT_TITLE, WIDTH - 24), WIDTH / 2, 34, FONT_TITLE, k["text"])
+    _pair_art(a, now, True, moving)
+    if st == am_proto.PREP:
+        spinner(WIDTH / 2, 150, now, k["purple_l"])
+        ctext("getting %s ready..." % fit(name, FONT_SMALL, 160), WIDTH / 2, 168, FONT_SMALL, k["muted"])
+    elif st == am_proto.OFFER:
+        spinner(WIDTH / 2, 146, now, k["blue"])
+        ctext(fit("Waiting for %s to accept" % who, FONT_BODY, 290), WIDTH / 2, 164, FONT_BODY, k["text"])
+        ctext(fmt_app(app["size"], app["files"]) if app else "", WIDTH / 2, 182, FONT_SMALL, k["muted"])
+    elif st == am_proto.SEND:
+        _progress(a, now, eng.done, eng.total, 134)
+        sp = eng.speed()
+        rtext("%s/s" % fmt_size(sp) if sp else "", WIDTH - 20, 166, FONT_SMALL, k["muted"])
+        text(fit(eng.current_file(), FONT_SMALL, 200), 20, 166, FONT_SMALL, k["muted"])
+        if not (a.msg is not None and now < a.msg_until):
+            ctext("keep the badges close", WIDTH / 2, 194, FONT_SMALL, k["dim"])
+    else:
+        bar(20, 134, WIDTH - 40, 8, 1.0, k["green"], k["line"])
+        spinner(WIDTH / 2, 162, now, k["green"])
+        phase = eng.remote_phase
+        if phase >= am_proto.INSTALLING:
+            msg = "%s is installing %s" % (who, name)
+        elif phase == am_proto.CHECKING:
+            msg = "%s is checking the files" % who
+        else:
+            msg = "Waiting for %s to check it" % who
+        ctext(fit(msg, FONT_BODY, 290), WIDTH / 2, 178, FONT_BODY, k["text"])
+    toast(a, now, 194)
+    if eng.can_cancel():
+        hints((("cancel", "BACK"),))
+
+
+def _in(a, now):
+    k = K()
+    header(a)
+    eng = a.engine
+    st = eng.state
+    m = eng.m or a.offer or {}
+    name = m.get("name", "app")
+    if st == am_proto.RECV:
+        title = "Receiving " + name
+    elif st == am_proto.VERIFY:
+        title = "Checking " + name
+    else:
+        title = "Installing " + name
+    ctext(fit(title, FONT_TITLE, WIDTH - 24), WIDTH / 2, 34, FONT_TITLE, k["text"])
+    _pair_art(a, now, False, st == am_proto.RECV)
+    if st == am_proto.RECV:
+        _progress(a, now, eng.done, eng.total, 134)
+        sp = eng.speed()
+        rtext("%s/s" % fmt_size(sp) if sp else "", WIDTH - 20, 166, FONT_SMALL, k["muted"])
+        text(fit(eng.current_file(), FONT_SMALL, 200), 20, 166, FONT_SMALL, k["muted"])
+        if not eng.orphan and not (a.msg is not None and now < a.msg_until):
+            ctext("keep the badges close", WIDTH / 2, 194, FONT_SMALL, k["dim"])
+    else:
+        bar(20, 134, WIDTH - 40, 8, 1.0, k["green"], k["line"])
+        spinner(WIDTH / 2, 160, now, k["green"] if st == am_proto.INSTALL else k["blue"])
+        if st == am_proto.VERIFY:
+            msg = "checking every file..."
+        else:
+            msg = "installing - keep the badge on"
+        ctext(msg, WIDTH / 2, 176, FONT_SMALL, k["muted"])
+    if eng.orphan:
+        ctext(fit("%s walked away - finishing here" % a.partner_name, FONT_SMALL, 290),
+              WIDTH / 2, 194, FONT_SMALL, k["gold"])
+    else:
+        toast(a, now, 194)
+    if st in (am_proto.RECV, am_proto.VERIFY):
+        hints((("cancel", "BACK"),))
+
+
+def _ask(a, now):
+    k = K()
+    header(a)
+    m = a.offer
+    eng = a.engine
+    identicon(a, a.partner_id, 16, 34, 28)
+    who = fit(a.partner_name, FONT_BODY, 230)
+    ww, wh = measure(who, FONT_BODY)
+    text(who, 52, 35, FONT_BODY, k["text"])
+    text("wants to send you", 52, 37 + wh + 1, FONT_SMALL, k["muted"])
+    name = fit(m.get("name", m.get("slug", "app")), FONT_TITLE, WIDTH - 32)
+    nw, nh = measure(name, FONT_TITLE)
+    text(name, 16, 70, FONT_TITLE, k["text"])
+    y = 74 + nh
+    text(fmt_app(m["total"], len(m["files"])), 16, y, FONT_BODY, k["muted"])
+    y += 16
+    mine = a.offer_local
+    if mine is not None:
+        if mine["size"] == m["total"] and mine["files"] == len(m["files"]):
+            s = "Replaces your %s (same size)" % mine["name"]
+        else:
+            s = "Replaces your %s (yours is %s)" % (mine["name"], fmt_size(mine["size"]))
+        text(fit(s, FONT_SMALL, WIDTH - 32), 16, y, FONT_SMALL, k["gold"])
+    else:
+        text("New app for your badge", 16, y, FONT_SMALL, k["green"])
+    # trust warning
+    wy = 128
+    box(12, wy, WIDTH - 24, 44, k["pink_d"], k["pink"])
+    warn_triangle(22, wy + 11, 20, k["pink"], k["pink_d"])
+    text("Apps can run any code on your badge.", 50, wy + 9, FONT_SMALL, k["text"])
+    text("Only accept from people you trust.", 50, wy + 25, FONT_SMALL, k["text"])
+    # countdown
+    left = eng.ask_left(now)
+    bar(16, 182, WIDTH - 32, 4, left / am_proto.ASK_MS, k["blue"], k["line"])
+    ctext("declines by itself in %d s" % ((left + 999) // 1000), WIDTH / 2, 192, FONT_SMALL, k["dim"])
+    hints((("accept", "ENTER"), ("decline", "BACK")))
+
+
+def _bad(a, now):
+    k = K()
+    header(a)
+    m, why = a.bad
+    status_icon(WIDTH / 2, 66, 18, False)
+    name = (m or {}).get("name") if isinstance(m, dict) else None
+    if name and isinstance(name, str):
+        t = "%s tried to send you %s" % (a.partner_name, name)
+    else:
+        t = "%s tried to send you an app" % a.partner_name
+    ctext(fit(t, FONT_BODY, WIDTH - 24), WIDTH / 2, 100, FONT_BODY, k["text"])
+    y = 122
+    lh = measure("Ag", FONT_SMALL)[1] + 5
+    ctext("Can't accept it:", WIDTH / 2, y, FONT_SMALL, k["muted"])
+    y += lh
+    for line in wrap(why, FONT_SMALL, WIDTH - 40):
+        ctext(line, WIDTH / 2, y, FONT_SMALL, k["pink"])
+        y += lh
+    if why.startswith("USB"):
+        ctext("Eject the badge from your computer first.", WIDTH / 2, y, FONT_SMALL, k["text"])
+        y += lh
+    ctext("It was declined automatically.", WIDTH / 2, y + 8, FONT_SMALL, k["muted"])
+    hints((("ok", "ENTER"),))
+
+
+def _result(a, now):
+    k = K()
+    header(a)
+    r = a.result
+    status_icon(WIDTH / 2, 74, 22, r["ok"])
+    title = r["title"]
+    w, h = measure(title, FONT_TITLE)
+    if w > WIDTH - 20 or h > 24:
+        title = fit(r["title"], FONT_BODY, WIDTH - 20)
+        ctext(title, WIDTH / 2, 112, FONT_BODY, k["text"])
+    else:
+        ctext(title, WIDTH / 2, 110, FONT_TITLE, k["text"])
+    y = 140
+    lh = measure("Ag", FONT_SMALL)[1] + 5
+    for line in r["lines"]:
+        for part in wrap(line, FONT_SMALL, WIDTH - 40):
+            ctext(part, WIDTH / 2, y, FONT_SMALL, k["muted"])
+            y += lh
+        y += 2
+    if r.get("gone"):
+        ctext(fit("%s walked away" % a.partner_name, FONT_SMALL, 280), WIDTH / 2, 198, FONT_SMALL,
+              k["gold"])
+    hints((("ok", "ENTER"),))

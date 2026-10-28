@@ -38,7 +38,7 @@ sending what and accepts or declines.
 Firmware globals used without import: `screen badge color font image shape vec2 rect
 mat3 run reset file_exists HIRES LORES VSYNC BUTTON_UP BUTTON_DOWN BUTTON_LEFT
 BUTTON_RIGHT BUTTON_SELECT BUTTON_BACK BUTTON_HOME BUTTON_MENU`. Allowed imports:
-`math random array struct os sys gc json hashlib binascii vfs rp2 micropython`
+`math random array struct os sys gc json hashlib binascii vfs rp2 micropython time`
 `from badgeware import State`, `from badgeware import link as badgelink`, `pairing`.
 No dataclasses/typing/enum/functools/itertools/walrus/match/`__slots__`. Module files
 start with `am_`. Drawing subset: `screen.pen/clear/rectangle/triangle/circle/line/
@@ -79,25 +79,49 @@ def p(path): return ROOT + path
   to `<slug>`; deletes the old copy; always remounts read-only in `finally`; deletes the
   staging copy. On failure it puts the old copy back if possible.
 - `exists(slug)`.
+- Incremental forms used by the UI so no frame stalls: `manifest_steps(slug, res)`,
+  `Staging.verify_steps(res)` and `install_steps(m, res)` are generators that yield
+  between 2-4 KB pieces and append their result to `res` (closing `install_steps`
+  early still remounts read-only). `Reader(slug)` keeps the current file open for the
+  sender; `clean_stage()` drops a half-received app (run at app start).
 
 ### `am_proto.py` (transfer protocol; App agent)
-Message = kind byte + body, never longer than `link.capacity()`.
+Message = kind byte + body (little endian), never longer than `link.capacity()`.
+`tid` is a 1-byte transfer id chosen by the sender for each offer; the receiver adopts
+it, and every message for another `tid` is ignored (late packets from a cancelled
+transfer can't leak into the next one).
 
 | Kind | Body | Meaning |
 |---|---|---|
-| `H` | `<B version>` | hello after linking |
-| `O` | `<H index><H count>` + manifest JSON piece | offer (manifest split into pieces) |
-| `A` | | receiver accepts the offer |
-| `D` | `<B reason>` | decline (0 declined, 1 too big, 2 invalid, 3 busy) |
-| `F` | `<H file><I offset>` + data | file data |
-| `K` | `<I bytes_received>` | receiver progress ack (every 8 chunks and at file ends) |
-| `V` | `<B ok>` | receiver verified and installed (1) or failed (0) |
-| `X` | | cancel by either side |
+| `H` | `<B version>` | hello after linking (version 1) |
+| `O` | `<B tid><H index><H count>` + manifest JSON piece | offer (manifest split into pieces of `capacity - 6` bytes; at most 64 KB of JSON) |
+| `A` | `<B tid>` | receiver accepts the offer |
+| `D` | `<B tid><B reason>` + optional UTF-8 text | decline (0 declined, 1 too big, 2 invalid, 3 busy, 4 timed out); the text says why (e.g. `USB disk mode is on`) |
+| `F` | `<B tid><H file><I offset>` + data | file data (`capacity - 8` bytes per chunk) |
+| `K` | `<B tid><I bytes_received>` | receiver progress ack (every 8 chunks, at file ends, and every 400 ms while data is unacked) |
+| `V` | `<B tid><B ok>` + UTF-8 reason | receiver verified and installed (1) or failed (0, reason shown to the sender) |
+| `X` | `<B tid>` | cancel by either side |
+| `S` | `<B tid><B phase>` | receiver status after the last byte: 1 checking files, 2 installing (the sender stops offering cancel; X is ignored once installing) |
 
 Sender keeps at most 24 unacknowledged `F` chunks in flight, retries `send()` that
-returned False on the next frame, and never blocks a frame for more than ~25 ms
-(`badge.ticks` budget). Receiver writes each chunk immediately. Offsets let the
-receiver ignore duplicates.
+returned False on the next frame (control messages queue in order ahead of data), and
+never blocks a frame for more than ~25 ms. `badge.ticks` is frozen for the whole frame
+(measured), so the budget uses `time.ticks_ms()`/`time.ticks_diff()`, with hard caps as a
+backstop: 32 messages, 6 hash steps, 4 install steps per frame; an install step is one
+2 KB flash write or one 2 KB read-back piece (~35 ms at the measured 58 KB/s). The receiver accepts only the next expected `(file, offset)` and writes it
+immediately; anything else (duplicates, gaps) is dropped and answered with a `K` of
+where it really is. If no ack arrives for 2.5 s the sender goes back to the last acked
+byte and resends (go-back-N); no progress for 20 s fails the transfer.
+
+Receiver checks the complete offer with `check_manifest(m, min(free_stage(),
+free_system()))` before asking; a failing offer is declined automatically (1 for "too
+big", otherwise 2) and the person only sees why. An unanswered offer is declined after
+30 s (4). An offer that arrives while busy, or while the receiver is in USB disk mode
+(`rp2.is_msc_busy()`, checked when the offer arrives so no transfer is wasted), gets 3; if both badges offer at the same
+moment the `link.central` badge's offer wins and the other side withdraws its own.
+After the last byte: VERIFY (sha256 of every staged file) -> INSTALL (`install_steps`,
+copies are hashed again after landing on /system) -> `V`. A link drop during VERIFY or
+INSTALL lets the receiver finish locally; anywhere else both sides discard everything.
 
 ### `am_ui.py` + `__init__.py` (screens and state machine; App agent)
 States: LOBBY (hold back to back; BACK exits) -> PAIRED (pick an app to send from the
