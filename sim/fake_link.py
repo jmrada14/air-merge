@@ -21,8 +21,16 @@ like walking away. Without a peer port nothing ever links, so solo runs are
 unaffected. `mute_at` (badge ticks) makes this badge go silent from then on
 (sends nothing, ignores everything) to test a mid-race drop.
 
-Messages are capped at MAX_MSG bytes so oversize packets fail loudly here
-rather than mysteriously on the badge.
+Capacity and flow control follow what was measured on the badge (DESIGN.md):
+
+- `link.capacity()` is 19 (MTU 23 - 4) until linked; MTU_MS of badge time after
+  linking it becomes `mtu - 4` (243 at the preferred MTU 247, `--link-mtu`).
+- `send(msg)` returns False (and counts why) when not linked, when the message is
+  longer than capacity() right now, or when OUTBOX_LIMIT messages are already
+  queued (backpressure). Queued messages drain to the peer at `kbps` KB/s of
+  badge time (`--link-kbps`, default 12), so transfers take realistic time.
+- The receiver keeps at most INBOX_LIMIT unread messages; more are dropped and
+  counted (`inbox_overflow`).
 """
 
 import socket
@@ -34,7 +42,14 @@ SYNC_MS = 1500
 COOL_MS = 3000
 TIMEOUT_MS = 1500
 HELLO_MS = 150
-MAX_MSG = 20
+MTU_MS = 300          # MTU exchange after linking
+MTU_BEFORE = 23       # capacity 19 until the exchange is done
+MTU_DEFAULT = 247     # preferred MTU: capacity 243
+MAX_MSG = MTU_DEFAULT - 4
+OUTBOX_LIMIT = 16     # queued, not yet transmitted messages
+INBOX_LIMIT = 256     # received, not yet read messages
+KBPS_DEFAULT = 12.0
+BURST = 1024          # bytes of send budget an idle link may bank
 
 
 class _Cfg:
@@ -44,9 +59,25 @@ class _Cfg:
     id = b"\x00\x00\x00\x00\x00\x01"
     mute_at = None
     badge = None
-    sent = 0
-    received = 0
+    mtu = MTU_DEFAULT
+    kbps = KBPS_DEFAULT
+    sent = 0              # messages accepted by send()
+    sent_bytes = 0
+    received = 0          # messages delivered to the inbox
+    recv_bytes = 0
     max_len = 0
+    rejected_unlinked = 0
+    rejected_big = 0
+    rejected_full = 0
+    big_max = 0           # longest message refused for being over capacity
+    inbox_overflow = 0
+    max_outbox = 0
+    max_inbox = 0
+    links = 0             # how many times this badge linked
+    drops = 0
+    first_tx = None       # badge ticks of the first / last message on the air
+    last_tx = None
+    tx_bytes = 0          # bytes actually transmitted (drained from the outbox)
 
 
 CFG = _Cfg()
@@ -82,6 +113,10 @@ class Link:
         self._last_rx = -1 << 30
         self._ready = False        # this side finished its proximity sync
         self._inbox = []
+        self._outbox = []
+        self._budget = 0.0
+        self._budget_at = 0
+        self._linked_at = None
         self._hello_at = -1 << 30
         self._sock = None
         if CFG.port is not None:
@@ -111,7 +146,7 @@ class Link:
         s = self._sock
         while s is not None:
             try:
-                data, _ = s.recvfrom(256)
+                data, _ = s.recvfrom(4096)
             except (BlockingIOError, InterruptedError):
                 break
             except OSError:
@@ -140,8 +175,14 @@ class Link:
             elif kind == b"M":
                 self._last_rx = now
                 if self.linked:
+                    if len(self._inbox) >= INBOX_LIMIT:
+                        CFG.inbox_overflow += 1
+                        continue
                     self._inbox.append(bytes(data[1:]))
                     CFG.received += 1
+                    CFG.recv_bytes += len(data) - 1
+                    if len(self._inbox) > CFG.max_inbox:
+                        CFG.max_inbox = len(self._inbox)
             elif kind == b"B":
                 self._peer_ready = False
                 self._last_rx = now
@@ -154,12 +195,49 @@ class Link:
                 and now - self._last_rx <= TIMEOUT_MS):
             self.linked = True
             self.partner = self._peer
+            self._linked_at = now
+            self._budget = 0.0
+            self._budget_at = now
+            CFG.links += 1
+        self._drain()
 
     def _drop(self):
+        if self.linked:
+            CFG.drops += 1
         self.linked = False
         self.partner = None
         self._ready = False
         self._inbox = []
+        self._outbox = []
+        self._linked_at = None
+
+    def _drain(self):
+        """Transmit queued messages as the link's byte budget allows."""
+        if not self.linked:
+            return
+        now = _now()
+        if now > self._budget_at:
+            self._budget += (now - self._budget_at) * CFG.kbps * 1024.0 / 1000.0
+            self._budget_at = now
+        ob = self._outbox
+        while ob and self._budget >= len(ob[0]):
+            msg = ob.pop(0)
+            self._budget -= len(msg)
+            self._tx(b"M" + msg)
+            CFG.tx_bytes += len(msg)
+            if CFG.first_tx is None:
+                CFG.first_tx = now
+            CFG.last_tx = now
+        if not ob and self._budget > BURST:
+            self._budget = BURST
+
+    def capacity(self):
+        """Largest message send() accepts right now (mtu - 4)."""
+        if not self.linked or self._linked_at is None:
+            return MTU_BEFORE - 4
+        if _now() - self._linked_at < MTU_MS:
+            return MTU_BEFORE - 4
+        return CFG.mtu - 4
 
     def _present(self, now):
         return self._peer is not None and now - self._last_rx <= TIMEOUT_MS
@@ -171,21 +249,38 @@ class Link:
 
     def send(self, data):
         data = bytes(data)
-        if len(data) > MAX_MSG:
-            raise ValueError("link message too long (%d > %d bytes): %r" % (len(data), MAX_MSG, data))
         if not self.linked:
+            CFG.rejected_unlinked += 1
+            return False
+        if len(data) > self.capacity():
+            CFG.rejected_big += 1
+            if len(data) > CFG.big_max:
+                CFG.big_max = len(data)
+            return False
+        self._drain()
+        if len(self._outbox) >= OUTBOX_LIMIT:
+            CFG.rejected_full += 1
             return False
         if len(data) > CFG.max_len:
             CFG.max_len = len(data)
         CFG.sent += 1
-        self._tx(b"M" + data)
+        CFG.sent_bytes += len(data)
+        self._outbox.append(data)
+        if len(self._outbox) > CFG.max_outbox:
+            CFG.max_outbox = len(self._outbox)
+        self._drain()
         return True
+
+    def pending(self):
+        """Sim helper: messages queued but not yet transmitted."""
+        return len(self._outbox)
 
     def update(self):
         now = _now()
         if now - self._hello_at >= HELLO_MS:
             self._hello_at = now
             self._hello()
+        self._drain()
 
     def leave(self):
         self._tx(b"B")
@@ -338,9 +433,14 @@ class Pairing:
 
 # --------------------------------------------------------------------------
 
-def install(badge, port=None, peer=None, name="badge", id_=None, mute_at=None):
+def install(badge, port=None, peer=None, name="badge", id_=None, mute_at=None,
+            kbps=None, mtu=None):
     """Register fake `badgeware.link` and `pairing` modules (call after badge_sim.install)."""
     CFG.badge = badge
+    if kbps is not None:
+        CFG.kbps = float(kbps)
+    if mtu is not None:
+        CFG.mtu = int(mtu)
     CFG.port = port
     CFG.peer = peer
     CFG.name = name
@@ -363,3 +463,25 @@ def install(badge, port=None, peer=None, name="badge", id_=None, mute_at=None):
     pm.Pairing = Pairing
     sys.modules["pairing"] = pm
     return CFG
+
+
+def report():
+    """End-of-run summary lines (prefixed 'link:')."""
+    c = CFG
+    if not (c.sent or c.received or c.links or c.rejected_unlinked):
+        return []
+    lines = ["link: linked %d time(s), dropped %d; mtu %d (capacity %d), %.1f KB/s"
+             % (c.links, c.drops, c.mtu, c.mtu - 4, c.kbps),
+             "link: %d messages sent (largest %d bytes, %d bytes), %d received (%d bytes)"
+             % (c.sent, c.max_len, c.sent_bytes, c.received, c.recv_bytes)]
+    if (c.first_tx is not None and c.last_tx is not None and c.last_tx > c.first_tx
+            and c.tx_bytes >= 8192):
+        secs = (c.last_tx - c.first_tx) / 1000.0
+        lines.append("link: transmitted %d bytes between the first and last message, %.1f s "
+                     "of badge time (%.1f KB/s average, link rate %.1f KB/s)"
+                     % (c.tx_bytes, secs, c.tx_bytes / 1024.0 / secs, c.kbps))
+    lines.append("link: send() refused: %d not linked, %d over capacity (longest %d), "
+                 "%d backpressure; max outbox %d/%d, max inbox %d/%d, inbox overflow %d"
+                 % (c.rejected_unlinked, c.rejected_big, c.big_max, c.rejected_full,
+                    c.max_outbox, OUTBOX_LIMIT, c.max_inbox, INBOX_LIMIT, c.inbox_overflow))
+    return lines

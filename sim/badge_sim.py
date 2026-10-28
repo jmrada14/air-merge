@@ -4,7 +4,7 @@
 into `builtins`, registers fake `badgeware` and `micropython` modules and adds
 the app directory to sys.path. Pure standard library; no Pillow.
 
-The rasteriser implements exactly the drawing subset in CONTRACT.md:
+The rasteriser implements exactly the drawing subset in DESIGN.md:
 clear, rectangle, triangle, circle, line, text, measure_text. Pixel centres are
 sampled at (x + 0.5, y + 0.5), so shapes sharing an edge tile without gaps or
 double-blending.
@@ -701,8 +701,9 @@ class State:
 class Sim:
     """Handle returned by install(); the runner drives frames through it."""
 
-    def __init__(self, app_dir):
+    def __init__(self, app_dir, slug="air_merge"):
         self.app_dir = os.path.abspath(app_dir)
+        self.slug = slug
         self.screen = Screen()
         self.badge = Badge()
         self.update = None
@@ -713,24 +714,36 @@ class Sim:
         self.run_calls += 1
         return types.SimpleNamespace(result=None)
 
-    def file_exists(self, path):
+    def map_path(self, path):
+        """Badge path -> host path. The running app's own folder
+        (/system/apps/<slug>/) maps to the repo's app/ folder; other absolute
+        paths go into the sandbox (builtins.AM_ROOT) when one is set; paths that
+        already carry the sandbox prefix are left alone."""
         p = str(path)
-        prefix = "/system/apps/mona_kart/"
+        root = getattr(builtins, "AM_ROOT", "")
+        if root and (p == root or p.startswith(root + "/")):
+            return p
+        prefix = "/system/apps/%s/" % self.slug
         if p.startswith(prefix):
-            p = os.path.join(self.app_dir, p[len(prefix):])
-        elif not os.path.isabs(p):
-            p = os.path.join(self.app_dir, p)
-        return os.path.exists(p)
+            return os.path.join(self.app_dir, p[len(prefix):])
+        if not os.path.isabs(p):
+            return os.path.join(self.app_dir, p)
+        if root:
+            return root + p
+        return p
+
+    def file_exists(self, path):
+        return os.path.exists(self.map_path(path))
 
 
 def _reset(*a):
     raise AppExit("reset() called")
 
 
-def install(app_dir, script=None, state_dir=None):
+def install(app_dir, script=None, state_dir=None, slug="air_merge"):
     """Install fake firmware globals. `script` is accepted for API symmetry
     (the runner parses input scripts itself). Returns a Sim handle."""
-    sim = Sim(app_dir)
+    sim = Sim(app_dir, slug)
     here = os.path.dirname(os.path.abspath(__file__))
     State.dir = state_dir or os.path.join(here, "out", "state")
     sim.script = script

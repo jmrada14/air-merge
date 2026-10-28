@@ -16,7 +16,18 @@ BANNED_MODULES = {
     "collections.abc", "typing_extensions", "__future__", "threading", "pathlib",
 }
 ALLOWED_MODULES = {"math", "random", "array", "struct", "os", "sys", "gc", "micropython",
-                   "badgeware", "pairing"}
+                   "badgeware", "pairing", "json", "hashlib", "binascii", "vfs", "rp2",
+                   "builtins"}
+LOCAL_PREFIX = "am_"
+# CPython os functions MicroPython's os module doesn't have
+OS_MISSING = {"path", "walk", "makedirs", "removedirs", "scandir", "replace", "getenv",
+              "environ", "fsync", "chmod", "link", "symlink", "readlink", "lstat",
+              "truncate", "fspath", "access", "getpid", "cpu_count"}
+# str/bytes methods missing on MicroPython (flagged on any attribute call; rename
+# your own methods if one of these collides)
+STR_MISSING = {"ljust", "rjust", "zfill", "title", "capitalize", "casefold", "swapcase",
+               "removeprefix", "removesuffix", "expandtabs", "format_map",
+               "isidentifier", "isprintable", "isnumeric", "isdecimal", "hexdigest"}
 # firmware names importable from badgeware (everything else there is a global)
 BADGEWARE_NAMES = {"State", "link"}
 COLLIDING = {"ui", "game", "world", "render", "app", "icons", "mona", "items", "monsters",
@@ -40,11 +51,12 @@ class Checker(ast.NodeVisitor):
             self.add(node, "import of '%s' collides with other badge apps' modules" % name)
         elif name in BANNED_MODULES or root in BANNED_MODULES:
             self.add(node, "import of '%s' is not available / not allowed on the badge" % name)
-        elif root not in ALLOWED_MODULES and root not in self.local and not root.startswith("kart_"):
-            self.add(node, "import of '%s' is outside the contract allowlist (%s, kart_*)"
-                     % (name, ", ".join(sorted(ALLOWED_MODULES))))
-        elif root in self.local and not root.startswith("kart_"):
-            self.add(node, "local module '%s' should be named kart_*" % root)
+        elif (root not in ALLOWED_MODULES and root not in self.local
+              and not root.startswith(LOCAL_PREFIX)):
+            self.add(node, "import of '%s' is outside the contract allowlist (%s, %s*)"
+                     % (name, ", ".join(sorted(ALLOWED_MODULES)), LOCAL_PREFIX))
+        elif root in self.local and not root.startswith(LOCAL_PREFIX):
+            self.add(node, "local module '%s' should be named %s*" % (root, LOCAL_PREFIX))
 
     def visit_Import(self, node):
         for a in node.names:
@@ -132,6 +144,27 @@ class Checker(ast.NodeVisitor):
         f = node.func
         if isinstance(f, ast.Name) and f.id in ("breakpoint", "exec", "eval", "compile"):
             self.add(node, "%s() is unavailable or a bad idea on the badge" % f.id)
+        if isinstance(f, ast.Attribute):
+            if f.attr in STR_MISSING:
+                what = ("hashlib digests have no hexdigest(); use binascii.hexlify(h.digest())"
+                        if f.attr == "hexdigest" else
+                        "%s() is not available on MicroPython str/bytes" % f.attr)
+                self.add(node, what)
+            if (f.attr == "dumps" and isinstance(f.value, ast.Name) and f.value.id == "json"):
+                for kw in node.keywords:
+                    if kw.arg in ("indent", "sort_keys", "default", "ensure_ascii"):
+                        self.add(node, "json.dumps(%s=...) is not supported on MicroPython"
+                                 % kw.arg)
+        if isinstance(f, ast.Name) and f.id == "print":
+            for kw in node.keywords:
+                if kw.arg == "flush":
+                    self.add(node, "print(flush=...) is not supported on MicroPython")
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node):
+        v = node.value
+        if isinstance(v, ast.Name) and v.id == "os" and node.attr in OS_MISSING:
+            self.add(node, "os.%s does not exist on MicroPython" % node.attr)
         self.generic_visit(node)
 
 

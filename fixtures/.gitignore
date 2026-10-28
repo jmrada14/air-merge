@@ -1,0 +1,4 @@
+# The pixel_garden fixture deliberately ships junk that Air Merge must NOT transfer.
+!__pycache__/
+!*.pyc
+!.DS_Store
