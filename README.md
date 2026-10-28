@@ -50,9 +50,18 @@ Every badge that wants to send or receive needs Air Merge once.
 3. Reboot the badge. Air Merge appears at the end of the menu.
 
 The installer finds the badge on macOS and Linux, copies the app into
-`apps/air_merge/`, checks the copy and ejects the disk. Options:
-`--volume PATH` if the badge mounts somewhere else, `--ref NAME` to install a
-branch or tag, `--no-eject` to leave it mounted.
+`apps/air_merge/`, checks the copy and ejects the disk. It also gives Air
+Merge its own menu icon, a beacon whose rings ripple out when the tile is
+selected. The icon needs Python 3; the first run downloads `mpy-cross` 1.26.1
+into `~/.cache/air-merge` to rebuild the menu's `icons.mpy`, and keeps the
+menu's original icon files in `~/.cache/air-merge/menu-backup`. Other apps'
+icons are left as they are. Without Python, Air Merge still installs and shows
+the default icon. A badge that gets Air Merge over the air, from a friend,
+also shows the default icon until it runs the installer.
+
+Options: `--volume PATH` if the badge mounts somewhere else, `--ref NAME` to
+install a branch or tag, `--no-icon` to leave the menu alone, `--no-eject` to
+leave the disk mounted.
 
 ## Layout
 
@@ -66,6 +75,7 @@ branch or tag, `--no-eject` to leave it mounted.
 | `sim/` | Two-badge desktop simulator, see `sim/README.md` |
 | `fixtures/` | Sample apps used by the simulator |
 | `install.sh` | Installs Air Merge onto a badge in USB disk mode |
+| `tools/menu_icon.py` | Builds the menu icon and its animation (`--preview` draws a PNG of the frames) |
 | `DESIGN.md` | Measured badge facts, module contract and protocol |
 
 ## Simulator
